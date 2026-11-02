@@ -1,0 +1,109 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    name: Build & Package Android APK
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Auto-Verify & Sync Firebase Configuration
+        run: |
+          node scripts/sync-firebase-config.mjs
+
+      - name: Install Node Dependencies
+        run: |
+          npm install --legacy-peer-deps
+
+      - name: Build Web Assets with Linked Firebase Project
+        run: |
+          npx vite build --base=./
+        env:
+          NODE_ENV: production
+
+      - name: Setup Capacitor & Configure Android Google Services
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          npm install @capacitor/core @capacitor/cli @capacitor/android --legacy-peer-deps
+          if [ ! -f "capacitor.config.json" ]; then
+            npx -y @capacitor/cli init "TRUST WALLET PRO" "com.trustwallet.pro" --web-dir dist || true
+          fi
+
+          # Preserve any existing google-services.json before regenerating android platform
+          if [ -f "android/app/google-services.json" ] && [ ! -f "google-services.json" ]; then
+            cp android/app/google-services.json ./google-services.json
+          fi
+
+          rm -rf android
+          npx -y @capacitor/cli add android
+
+          # Automatically restore google-services.json from repository or GitHub Secrets if available
+          node scripts/sync-firebase-config.mjs
+
+          # Ensure Google Services Gradle classpath is declared in android/build.gradle
+          node -e '
+            const fs = require("fs");
+            const rootGradlePath = "android/build.gradle";
+            if (fs.existsSync(rootGradlePath)) {
+              let content = fs.readFileSync(rootGradlePath, "utf8");
+              if (!content.includes("com.google.gms:google-services")) {
+                content = content.replace(
+                  /dependencies\s*\{/,
+                  "dependencies {\n        classpath \x27com.google.gms:google-services:4.4.4\x27"
+                );
+                fs.writeFileSync(rootGradlePath, content, "utf8");
+              }
+            }
+          '
+
+          npx -y @capacitor/cli sync android
+          ls -la android/gradlew
+
+      - name: Build Android Debug APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Package APK for Download
+        run: |
+          mkdir -p output-apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk output-apk/TrustWallet-Pro.apk || cp android/app/build/outputs/apk/debug/*.apk output-apk/TrustWallet-Pro.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrustWallet-Pro-APK
+          path: output-apk/TrustWallet-Pro.apk
+          retention-days: 30
+
+      - name: Build Summary
+        run: |
+          echo "### 🚀 تم بناء وتوليد ملف APK بنجاح!" >> $GITHUB_STEP_SUMMARY
+          echo "تم ربط التطبيق تلقائياً بمشروع Firebase الحالي دون الحاجة لإدخال أي مفاتيح يدوية." >> $GITHUB_STEP_SUMMARY
+          echo "يمكنك تنزيل ملف التطبيق الآن من قسم **Artifacts** باسم **TrustWallet-Pro-APK**." >> $GITHUB_STEP_SUMMARY

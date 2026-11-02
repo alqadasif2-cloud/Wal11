@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Users collection: Centralized profiles across all devices
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+
+    // Wallets collection: Centralized wallets & balances for multi-device atomic transfers
+    match /wallets/{walletId} {
+      allow read, write: if true;
+    }
+
+    // Transactions collection: Centralized financial ledger
+    match /transactions/{transactionId} {
+      allow read, write: if true;
+    }
+
+    // Notifications collection: Centralized cross-device alerts
+    match /notifications/{notificationId} {
+      allow read, write: if true;
+    }
+
+    // Conversations & Messages: Multi-user real-time chat
+    match /conversations/{conversationId} {
+      allow read, write: if true;
+
+      match /messages/{messageId} {
+        allow read, write: if true;
+      }
+    }
+
+    // Market Prices: Real-time price cache
+    match /marketPrices/{symbol} {
+      allow read, write: if true;
+    }
+  }
+}
