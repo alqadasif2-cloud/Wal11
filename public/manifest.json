@@ -1,6 +1,7 @@
 {
   "short_name": "TrustWallet",
   "name": "TRUST WALLET PRO",
+  "version": "1.0.1",
   "icons": [
     {
       "src": "/assets/aistudio/Screenshot_20261021140623_7cfed00d.jpg",

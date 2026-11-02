@@ -324,7 +324,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {/* Footer Info */}
       <div className="text-center pt-2 pb-6 space-y-1">
         <p className="text-xs font-bold text-slate-400 tracking-wider">
-          TRUST WALLET v4.2
+          TRUST WALLET v1.0.1
         </p>
         <p className="text-[10px] text-slate-600">
           Secure decentralized multi-asset wallet simulation
