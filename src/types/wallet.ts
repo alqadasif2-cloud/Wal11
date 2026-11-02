@@ -115,3 +115,35 @@ export interface AuditLog {
   newValue?: string;
   details?: string;
 }
+
+/**
+ * Only show real wallet-to-wallet sent & received transfers in user transaction history.
+ * Excludes owner/admin balance adjustments and internal self-swaps.
+ */
+export function isWalletTransferTransaction(tx: Transaction | null | undefined): boolean {
+  if (!tx) return false;
+  if (tx.transactionType === 'admin_adjustment') return false;
+  if (tx.transactionId?.startsWith('TX_ADMIN_')) return false;
+  if (tx.transactionId?.startsWith('TX_SWAP_')) return false;
+  if (tx.senderUsername && /^admin\b/i.test(tx.senderUsername.trim())) return false;
+  if (tx.isSimulated && tx.notes?.startsWith('تعديل إداري')) return false;
+  if (tx.senderUserId && tx.receiverUserId && tx.senderUserId === tx.receiverUserId) return false;
+  return (
+    tx.transactionType === 'send' ||
+    tx.transactionType === 'receive' ||
+    tx.transactionType === 'refund'
+  );
+}
+
+/**
+ * Hide administrative balance-adjustment notifications from user notification feeds.
+ */
+export function isUserVisibleNotification(notif: AppNotification | null | undefined): boolean {
+  if (!notif) return false;
+  if (notif.transactionId?.startsWith('TX_ADMIN_')) return false;
+  if (notif.type === 'admin' && (notif.titleAr?.includes('الإدارة') || notif.title?.toLowerCase().includes('admin'))) {
+    return false;
+  }
+  return true;
+}
+

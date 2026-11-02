@@ -39,17 +39,17 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Brand Left */}
         <div className="flex items-center gap-2 shrink-0">
           <TrustWalletShield size={32} />
-          <span className="font-extrabold text-sm sm:text-base tracking-wide bg-gradient-to-r from-blue-400 via-cyan-400 to-emerald-400 bg-clip-text text-transparent hidden sm:inline">
+          <span className="font-extrabold text-xs sm:text-base tracking-wide bg-gradient-to-r from-blue-400 via-cyan-400 to-emerald-400 bg-clip-text text-transparent">
             TRUST WALLET
           </span>
         </div>
 
         {/* Center: Current Account Badge & Direct Logout Button */}
         {currentUser ? (
-          <div className="flex items-center gap-1.5 sm:gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
             <div 
               onClick={isOwner ? onOpenWalletSwitcher : undefined}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-900/90 border border-slate-800 shadow-sm max-w-[150px] sm:max-w-xs ${
+              className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full bg-slate-900/90 border border-slate-800 shadow-sm max-w-[105px] sm:max-w-xs ${
                 isOwner ? 'cursor-pointer hover:border-slate-700 transition-colors' : 'cursor-default'
               }`}
               title={isOwner ? (isArabic ? 'تبديل الحساب / المحفظة' : 'Switch Wallet') : undefined}

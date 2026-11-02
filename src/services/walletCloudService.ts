@@ -11,7 +11,14 @@ import {
   Unsubscribe,
 } from 'firebase/firestore';
 import { db, ensureFirebaseAuth, handleFirestoreError, OperationType } from './firebase';
-import { AppNotification, Transaction, User, Wallet } from '../types/wallet';
+import {
+  AppNotification,
+  isUserVisibleNotification,
+  isWalletTransferTransaction,
+  Transaction,
+  User,
+  Wallet,
+} from '../types/wallet';
 import { createDefaultAssets } from './walletDb';
 
 export function cleanForFirestore<T>(obj: T): T {
@@ -53,6 +60,19 @@ export interface CloudSendTransferResult {
   message: string;
   transaction?: Transaction;
   updatedSenderWallet?: Wallet;
+  updatedRecipientWallet?: Wallet;
+}
+
+function pickNewerWalletData(
+  a?: Partial<Wallet> | null,
+  b?: Partial<Wallet> | null
+): Partial<Wallet> | null {
+  if (!a && !b) return null;
+  if (!a) return b || null;
+  if (!b) return a || null;
+  const timeA = a.updatedAt ? Date.parse(a.updatedAt) || 0 : 0;
+  const timeB = b.updatedAt ? Date.parse(b.updatedAt) || 0 : 0;
+  return timeB > timeA ? b : a;
 }
 
 export class WalletCloudService {
@@ -238,16 +258,25 @@ export class WalletCloudService {
   }
 
   /**
-   * Fetch live wallet directly from Cloud Firestore.
+   * Fetch live wallet directly from Cloud Firestore (picking newest across userId & ownerUserId docs).
    */
   static async fetchUserWalletCloud(userId: string): Promise<Wallet | null> {
     if (!userId) return null;
     try {
       await ensureFirebaseAuth();
+      let candidate: Wallet | null = null;
       const wDoc = await getDoc(doc(db, 'wallets', userId));
-      if (wDoc.exists()) return wDoc.data() as Wallet;
+      if (wDoc.exists()) {
+        candidate = wDoc.data() as Wallet;
+      }
       const snap = await getDocs(query(collection(db, 'wallets'), where('ownerUserId', '==', userId)));
-      if (!snap.empty) return snap.docs[0].data() as Wallet;
+      if (!snap.empty) {
+        snap.forEach((d) => {
+          const data = d.data() as Wallet;
+          candidate = (pickNewerWalletData(candidate, data) as Wallet) || candidate;
+        });
+      }
+      return candidate;
     } catch (e) {
       console.warn('[WalletCloudService] fetchUserWalletCloud note:', e);
     }
@@ -403,28 +432,50 @@ export class WalletCloudService {
       };
 
       const senderWalletRef = doc(db, 'wallets', sender.userId);
+      const senderAltWalletRef =
+        sender.walletId && sender.walletId !== sender.userId
+          ? doc(db, 'wallets', sender.walletId)
+          : null;
       const recipientWalletRef = doc(db, 'wallets', recipient.userId);
+      const recipientAltWalletRef =
+        recipient.walletId && recipient.walletId !== recipient.userId
+          ? doc(db, 'wallets', recipient.walletId)
+          : null;
       const txDocRef = doc(db, 'transactions', txId);
       const notifDocRef = doc(db, 'notifications', notifId);
 
       let finalSenderWallet: Wallet | null = null;
+      let finalRecipientWallet: Wallet | null = null;
 
       await runTransaction(db, async (t) => {
+        // Perform all reads first (Firestore transaction requirement)
         const senderSnap = await t.get(senderWalletRef);
+        const senderAltSnap = senderAltWalletRef ? await t.get(senderAltWalletRef) : null;
+        const recipientSnap = await t.get(recipientWalletRef);
+        const recipientAltSnap = recipientAltWalletRef ? await t.get(recipientAltWalletRef) : null;
+
+        const bestSenderCloud = pickNewerWalletData(
+          senderSnap.exists() ? (senderSnap.data() as Partial<Wallet>) : null,
+          senderAltSnap && senderAltSnap.exists() ? (senderAltSnap.data() as Partial<Wallet>) : null
+        );
+
         let curSenderTotal = senderWallet.totalDemoBalance;
         let curSenderAvailable = senderWallet.availableDemoBalance;
         let curSenderLocked = senderWallet.lockedDemoBalance;
 
-        if (senderSnap.exists()) {
-          const sData = senderSnap.data() as Partial<Wallet>;
+        if (bestSenderCloud) {
           curSenderTotal =
-            typeof sData.totalDemoBalance === 'number' ? sData.totalDemoBalance : curSenderTotal;
+            typeof bestSenderCloud.totalDemoBalance === 'number'
+              ? bestSenderCloud.totalDemoBalance
+              : curSenderTotal;
           curSenderAvailable =
-            typeof sData.availableDemoBalance === 'number'
-              ? sData.availableDemoBalance
+            typeof bestSenderCloud.availableDemoBalance === 'number'
+              ? bestSenderCloud.availableDemoBalance
               : curSenderAvailable;
           curSenderLocked =
-            typeof sData.lockedDemoBalance === 'number' ? sData.lockedDemoBalance : curSenderLocked;
+            typeof bestSenderCloud.lockedDemoBalance === 'number'
+              ? bestSenderCloud.lockedDemoBalance
+              : curSenderLocked;
         }
 
         if (curSenderAvailable < amount) {
@@ -433,22 +484,30 @@ export class WalletCloudService {
           );
         }
 
-        const recipientSnap = await t.get(recipientWalletRef);
-        let curRecipientTotal = 0;
-        let curRecipientAvailable = 0;
-        let curRecipientLocked = 0;
-        let recipientNetwork = 'BEP20';
+        const bestRecipientCloud = pickNewerWalletData(
+          recipientSnap.exists() ? (recipientSnap.data() as Partial<Wallet>) : null,
+          recipientAltSnap && recipientAltSnap.exists()
+            ? (recipientAltSnap.data() as Partial<Wallet>)
+            : null
+        );
+        const fallbackRecipient = params.recipientWallet || null;
+        const activeRecipientBase = bestRecipientCloud || fallbackRecipient;
 
-        if (recipientSnap.exists()) {
-          const rData = recipientSnap.data() as Partial<Wallet>;
-          curRecipientTotal = typeof rData.totalDemoBalance === 'number' ? rData.totalDemoBalance : 0;
-          curRecipientAvailable =
-            typeof rData.availableDemoBalance === 'number' ? rData.availableDemoBalance : 0;
-          curRecipientLocked =
-            typeof rData.lockedDemoBalance === 'number' ? rData.lockedDemoBalance : 0;
-          recipientNetwork = rData.networkType || 'BEP20';
-        }
+        const curRecipientTotal =
+          activeRecipientBase && typeof activeRecipientBase.totalDemoBalance === 'number'
+            ? activeRecipientBase.totalDemoBalance
+            : 0;
+        const curRecipientAvailable =
+          activeRecipientBase && typeof activeRecipientBase.availableDemoBalance === 'number'
+            ? activeRecipientBase.availableDemoBalance
+            : 0;
+        const curRecipientLocked =
+          activeRecipientBase && typeof activeRecipientBase.lockedDemoBalance === 'number'
+            ? activeRecipientBase.lockedDemoBalance
+            : 0;
+        const recipientNetwork = activeRecipientBase?.networkType || 'BEP20';
 
+        // Exact 1x deduction from sender and exact 1x addition to recipient
         const newSenderTotal = Math.max(0, Math.round((curSenderTotal - amount) * 100) / 100);
         const newSenderAvailable = Math.max(0, Math.round((curSenderAvailable - amount) * 100) / 100);
         const newRecipientTotal = Math.round((curRecipientTotal + amount) * 100) / 100;
@@ -461,7 +520,7 @@ export class WalletCloudService {
 
         const updatedSender: Wallet = {
           ...senderWallet,
-          walletId: senderWallet.walletId || sender.userId,
+          walletId: senderWallet.walletId || sender.walletId || sender.userId,
           ownerUserId: sender.userId,
           demoAddress: sender.demoAddress,
           totalDemoBalance: newSenderTotal,
@@ -484,10 +543,17 @@ export class WalletCloudService {
         };
 
         t.set(senderWalletRef, cleanForFirestore(updatedSender), { merge: true });
+        if (senderAltWalletRef) {
+          t.set(senderAltWalletRef, cleanForFirestore(updatedSender), { merge: true });
+        }
         t.set(recipientWalletRef, cleanForFirestore(updatedRecipient), { merge: true });
+        if (recipientAltWalletRef) {
+          t.set(recipientAltWalletRef, cleanForFirestore(updatedRecipient), { merge: true });
+        }
         t.set(txDocRef, cleanForFirestore(newTx));
         t.set(notifDocRef, cleanForFirestore(notificationPayload));
         finalSenderWallet = updatedSender;
+        finalRecipientWallet = updatedRecipient;
       });
 
       return {
@@ -497,6 +563,7 @@ export class WalletCloudService {
           : `تم إرسال $${amount.toFixed(2)} بنجاح إلى ${recipient.displayName || recipient.username}.`,
         transaction: newTx,
         updatedSenderWallet: finalSenderWallet || undefined,
+        updatedRecipientWallet: finalRecipientWallet || undefined,
       };
     } catch (err: unknown) {
       console.error('[WalletCloudService] Transfer error:', err);
@@ -510,6 +577,114 @@ export class WalletCloudService {
       setTimeout(() => {
         activeTransferLocks.delete(opKey);
       }, 2500);
+    }
+  }
+
+  /**
+   * Atomically adjust a target user's wallet balance by exact 1x amountDelta in Cloud Firestore
+   * WITHOUT creating any user-visible Transaction or Notification.
+   */
+  static async executeCloudAdminAdjustBalance(params: {
+    targetUser: User;
+    fallbackWallet?: Wallet | null;
+    amountDelta: number;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    prevBalance?: number;
+    newBalance?: number;
+    updatedWallet?: Wallet;
+  }> {
+    const { targetUser, fallbackWallet, amountDelta } = params;
+    const opKey = `admin_adj_${targetUser.userId}`;
+    if (activeTransferLocks.has(opKey)) {
+      return {
+        success: false,
+        message: 'عملية تعديل الرصيد قيد التنفيذ حالياً، يرجى الانتظار.',
+      };
+    }
+    activeTransferLocks.add(opKey);
+
+    try {
+      await ensureFirebaseAuth();
+      const nowIso = new Date().toISOString();
+      const primaryRef = doc(db, 'wallets', targetUser.userId);
+      const altRef =
+        targetUser.walletId && targetUser.walletId !== targetUser.userId
+          ? doc(db, 'wallets', targetUser.walletId)
+          : null;
+
+      let prevBalanceOut = 0;
+      let newBalanceOut = 0;
+      let finalWallet: Wallet | null = null;
+
+      await runTransaction(db, async (t) => {
+        const primarySnap = await t.get(primaryRef);
+        const altSnap = altRef ? await t.get(altRef) : null;
+
+        const bestCloud = pickNewerWalletData(
+          primarySnap.exists() ? (primarySnap.data() as Partial<Wallet>) : null,
+          altSnap && altSnap.exists() ? (altSnap.data() as Partial<Wallet>) : null
+        );
+        const base = bestCloud || fallbackWallet || null;
+
+        const curTotal =
+          base && typeof base.totalDemoBalance === 'number' ? base.totalDemoBalance : 0;
+        const curAvailable =
+          base && typeof base.availableDemoBalance === 'number' ? base.availableDemoBalance : 0;
+        const curLocked =
+          base && typeof base.lockedDemoBalance === 'number' ? base.lockedDemoBalance : 0;
+        const networkType = base?.networkType || 'BEP20';
+
+        if (amountDelta < 0 && curAvailable < Math.abs(amountDelta)) {
+          throw new Error('الرصيد المتاح لدى المستخدم لا يكفي للخصم المطلوب.');
+        }
+
+        const nextAvailable = Math.max(
+          0,
+          Math.round((curAvailable + amountDelta) * 100) / 100
+        );
+        const nextTotal = Math.max(0, Math.round((nextAvailable + curLocked) * 100) / 100);
+
+        const updated: Wallet = {
+          walletId: targetUser.walletId || targetUser.userId,
+          ownerUserId: targetUser.userId,
+          networkType,
+          demoAddress: targetUser.demoAddress,
+          totalDemoBalance: nextTotal,
+          availableDemoBalance: nextAvailable,
+          lockedDemoBalance: curLocked,
+          assets: createDefaultAssets(nextTotal),
+          updatedAt: nowIso,
+        };
+
+        t.set(primaryRef, cleanForFirestore(updated), { merge: true });
+        if (altRef) {
+          t.set(altRef, cleanForFirestore(updated), { merge: true });
+        }
+
+        prevBalanceOut = curTotal;
+        newBalanceOut = nextTotal;
+        finalWallet = updated;
+      });
+
+      return {
+        success: true,
+        message: `تم تحديث رصيد ${targetUser.username} بنجاح من $${prevBalanceOut.toFixed(2)} إلى $${newBalanceOut.toFixed(2)}.`,
+        prevBalance: prevBalanceOut,
+        newBalance: newBalanceOut,
+        updatedWallet: finalWallet || undefined,
+      };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : undefined;
+      return {
+        success: false,
+        message: msg || 'تعذر تنفيذ تعديل الرصيد سحابياً.',
+      };
+    } finally {
+      setTimeout(() => {
+        activeTransferLocks.delete(opKey);
+      }, 1000);
     }
   }
 
@@ -538,8 +713,7 @@ export class WalletCloudService {
   }
 
   /**
-   * Real-time Cloud Firestore Listener for user transactions.
-   * Discovers incoming transfers made by other devices/users and reconciles balance.
+   * Real-time Cloud Firestore Listener for user wallet-to-wallet transactions only.
    */
   static subscribeUserTransactions(
     userId: string,
@@ -553,7 +727,10 @@ export class WalletCloudService {
           const userTxs: Transaction[] = [];
           snap.forEach((d) => {
             const t = d.data() as Transaction;
-            if (t.senderUserId === userId || t.receiverUserId === userId) {
+            if (
+              (t.senderUserId === userId || t.receiverUserId === userId) &&
+              isWalletTransferTransaction(t)
+            ) {
               userTxs.push(t);
             }
           });
@@ -584,7 +761,7 @@ export class WalletCloudService {
           const userNotifs: AppNotification[] = [];
           snap.forEach((d) => {
             const n = d.data() as AppNotification;
-            if (n.recipientUserId === userId) {
+            if (n.recipientUserId === userId && isUserVisibleNotification(n)) {
               userNotifs.push(n);
             }
           });

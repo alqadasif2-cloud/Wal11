@@ -118,25 +118,19 @@ export default function App() {
   useEffect(() => {
     if (!currentUser?.userId) return;
 
-    // 1. Instant Cloud Wallet Listener (reflects incoming transfers from other phones immediately)
+    // 1. Instant Cloud Wallet Listener (reflects incoming transfers & balance updates immediately)
     const unsubWallet = WalletCloudService.subscribeUserWallet(currentUser.userId, (cloudWallet: Wallet) => {
-      setWallet(cloudWallet);
-      WalletDatabase.updateLocalWallet(cloudWallet);
+      WalletDatabase.updateLocalWallet(cloudWallet, false);
+      const hydratedWallet = WalletDatabase.getWalletByUserId(currentUser.userId);
+      setWallet(hydratedWallet || cloudWallet);
     });
 
-    // 2. Immediate reconcile
-    WalletDatabase.reconcileUserIncomingTransactions(currentUser.userId);
-
-    // 3. Transactions Listener
+    // 2. Wallet-to-wallet Transactions Listener (never mutates wallet balance)
     const unsubTxs = WalletCloudService.subscribeUserTransactions(currentUser.userId, (cloudTxs: Transaction[]) => {
-      WalletDatabase.reconcileUserIncomingTransactions(currentUser.userId);
       setTransactions(cloudTxs);
-      
-      const freshWallet = WalletDatabase.getWalletByUserId(currentUser.userId);
-      if (freshWallet) setWallet(freshWallet);
     });
 
-    // 4. Notifications Listener
+    // 3. Notifications Listener
     const unsubNotifs = WalletCloudService.subscribeUserNotifications(currentUser.userId, (cloudNotifs: AppNotification[]) => {
       setNotifications(cloudNotifs);
     });

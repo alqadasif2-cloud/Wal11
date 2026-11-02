@@ -17,6 +17,8 @@ import {
   AppNotification,
   AuditLog,
   CryptoAsset,
+  isUserVisibleNotification,
+  isWalletTransferTransaction,
   LiveMarketData,
   Transaction,
   User,
@@ -518,7 +520,7 @@ export class WalletDatabase {
             const cloudWallets: Wallet[] = [];
             snap.forEach((d) => cloudWallets.push(d.data() as Wallet));
             const localWallets = this.getWallets();
-            const merged = this.mergeEntities(localWallets, cloudWallets, 'walletId');
+            const merged = this.mergeWalletsByOwner(localWallets, cloudWallets);
             localStorage.setItem(STORAGE_KEYS.WALLETS, JSON.stringify(merged));
           }
         },
@@ -557,6 +559,39 @@ export class WalletDatabase {
     local.forEach((item) => map.set(item[idKey], item));
     cloud.forEach((item) => map.set(item[idKey], item));
     return Array.from(map.values());
+  }
+
+  private static mergeWalletsByOwner(local: Wallet[], cloud: Wallet[]): Wallet[] {
+    const byOwner = new Map<string, Wallet>();
+    const consider = (w: Wallet) => {
+      if (!w || !w.ownerUserId) return;
+      const existing = byOwner.get(w.ownerUserId);
+      if (!existing) {
+        byOwner.set(w.ownerUserId, w);
+        return;
+      }
+      const existingTime = existing.updatedAt ? Date.parse(existing.updatedAt) || 0 : 0;
+      const incomingTime = w.updatedAt ? Date.parse(w.updatedAt) || 0 : 0;
+      if (incomingTime >= existingTime) {
+        byOwner.set(w.ownerUserId, w);
+      }
+    };
+    local.forEach(consider);
+    cloud.forEach(consider);
+    return Array.from(byOwner.values());
+  }
+
+  private static persistWalletToFirestore(w: Wallet): void {
+    if (!w || !w.ownerUserId) return;
+    const payload = cleanForFirestore({
+      ...w,
+      walletId: w.walletId || w.ownerUserId,
+      updatedAt: w.updatedAt || new Date().toISOString(),
+    });
+    setDoc(doc(db, 'wallets', w.ownerUserId), payload, { merge: true }).catch(() => {});
+    if (w.walletId && w.walletId !== w.ownerUserId) {
+      setDoc(doc(db, 'wallets', w.walletId), payload, { merge: true }).catch(() => {});
+    }
   }
 
   private static async seedFirestoreInitialData(): Promise<void> {
@@ -623,7 +658,8 @@ export class WalletDatabase {
     this.initialize();
     try {
       const data = localStorage.getItem(STORAGE_KEYS.WALLETS);
-      return data ? JSON.parse(data) : [];
+      const parsed: Wallet[] = data ? JSON.parse(data) : [];
+      return this.mergeWalletsByOwner(parsed, []);
     } catch {
       return [];
     }
@@ -641,11 +677,14 @@ export class WalletDatabase {
     };
   }
 
-  static saveWallets(wallets: Wallet[]): void {
-    localStorage.setItem(STORAGE_KEYS.WALLETS, JSON.stringify(wallets));
-    wallets.forEach((w) => {
-      setDoc(doc(db, 'wallets', w.walletId), cleanForFirestore(w), { merge: true }).catch(() => {});
-    });
+  static saveWallets(wallets: Wallet[], syncToCloud = true): void {
+    const deduped = this.mergeWalletsByOwner(wallets, []);
+    localStorage.setItem(STORAGE_KEYS.WALLETS, JSON.stringify(deduped));
+    if (syncToCloud) {
+      deduped.forEach((w) => {
+        this.persistWalletToFirestore(w);
+      });
+    }
   }
 
   static saveUsers(users: User[]): void {
@@ -669,22 +708,25 @@ export class WalletDatabase {
     this.checkAndReleaseExpiredLocks();
     return this.getTransactions().filter(
       (t) =>
-        t.senderUserId === userId ||
-        t.receiverUserId === userId ||
-        (t.transactionType === 'refund' &&
-          (userId === 'usr_eslam_alqadasi' ||
-            t.senderUserId === userId ||
-            t.receiverUserId === userId))
+        isWalletTransferTransaction(t) &&
+        (t.senderUserId === userId ||
+          t.receiverUserId === userId ||
+          (t.transactionType === 'refund' &&
+            (userId === 'usr_eslam_alqadasi' ||
+              t.senderUserId === userId ||
+              t.receiverUserId === userId)))
     );
   }
 
-  static saveTransactions(txs: Transaction[]): void {
+  static saveTransactions(txs: Transaction[], syncToCloud = true): void {
     localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify(txs));
-    txs.forEach((t) => {
-      setDoc(doc(db, 'transactions', t.transactionId), cleanForFirestore(t), {
-        merge: true,
-      }).catch(() => {});
-    });
+    if (syncToCloud) {
+      txs.forEach((t) => {
+        setDoc(doc(db, 'transactions', t.transactionId), cleanForFirestore(t), {
+          merge: true,
+        }).catch(() => {});
+      });
+    }
   }
 
   static getAuditLogs(): AuditLog[] {
@@ -716,7 +758,7 @@ export class WalletDatabase {
     try {
       const data = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
       const all: AppNotification[] = data ? JSON.parse(data) : [];
-      return all.filter((n) => n.recipientUserId === userId);
+      return all.filter((n) => n.recipientUserId === userId && isUserVisibleNotification(n));
     } catch {
       return [];
     }
@@ -789,8 +831,8 @@ export class WalletDatabase {
       try {
         new Notification(title, {
           body,
-          icon: '/favicon.ico',
-          badge: '/favicon.ico',
+          icon: './assets/aistudio/Screenshot_20261014212008_a818ec9f.jpg',
+          badge: './assets/aistudio/Screenshot_20261014212008_a818ec9f.jpg',
           tag: 'trust-wallet-pro-transfer',
         });
       } catch {}
@@ -1256,20 +1298,20 @@ export class WalletDatabase {
     });
 
     if (result.success && result.transaction) {
+      // Cloud Firestore transaction already updated sender, recipient, and transaction atomically.
+      // Cache exact updated wallets locally without re-writing or double-crediting.
       if (result.updatedSenderWallet) {
-        this.updateLocalWallet(result.updatedSenderWallet);
-      } else {
-        senderWallet.availableDemoBalance =
-          Math.round((senderWallet.availableDemoBalance - amount) * 100) / 100;
-        senderWallet.totalDemoBalance =
-          Math.round((senderWallet.totalDemoBalance - amount) * 100) / 100;
-        senderWallet.assets = createDefaultAssets(senderWallet.totalDemoBalance);
-        this.updateLocalWallet(senderWallet);
+        this.updateLocalWallet(result.updatedSenderWallet, false);
+      }
+      if (result.updatedRecipientWallet) {
+        this.updateLocalWallet(result.updatedRecipientWallet, false);
       }
 
-      const txs = this.getTransactions();
+      const txs = this.getTransactions().filter(
+        (t) => t.transactionId !== result.transaction!.transactionId
+      );
       txs.unshift(result.transaction);
-      this.saveTransactions(txs);
+      this.saveTransactions(txs, false);
 
       this.addAuditLog({
         adminUserId: sender.userId,
@@ -1277,7 +1319,7 @@ export class WalletDatabase {
         actionType: 'transfer',
         targetUserId: recipient.userId,
         targetUsername: recipient.displayName || recipient.username,
-        reason: `تحويل تجريبي بقيمة $${amount.toFixed(2)}`,
+        reason: `تحويل بقيمة $${amount.toFixed(2)}`,
         details: `إرسال $${amount.toFixed(2)} إلى ${recipient.demoAddress}`,
       });
     }
@@ -1285,12 +1327,19 @@ export class WalletDatabase {
     return result;
   }
 
-  static updateLocalWallet(wallet: Wallet): void {
+  static updateLocalWallet(wallet: Wallet, syncToCloud = false): void {
     const wallets = this.getWallets();
-    const idx = wallets.findIndex((w) => w.ownerUserId === wallet.ownerUserId);
-    if (idx >= 0) wallets[idx] = wallet;
-    else wallets.push(wallet);
-    this.saveWallets(wallets);
+    const stamped: Wallet = {
+      ...wallet,
+      updatedAt: wallet.updatedAt || new Date().toISOString(),
+    };
+    const idx = wallets.findIndex((w) => w.ownerUserId === stamped.ownerUserId);
+    if (idx >= 0) wallets[idx] = stamped;
+    else wallets.push(stamped);
+    this.saveWallets(wallets, false);
+    if (syncToCloud) {
+      this.persistWalletToFirestore(stamped);
+    }
   }
 
   static executeSendTransfer(params: {
@@ -1454,67 +1503,23 @@ export class WalletDatabase {
     };
   }
 
-  static reconcileUserIncomingTransactions(userId: string): { newIncomingCount: number } {
-    if (!userId || typeof window === 'undefined') return { newIncomingCount: 0 };
-
-    let processedSet: Set<string>;
-    try {
-      const raw = localStorage.getItem(STORAGE_KEYS.PROCESSED_TXS);
-      processedSet = new Set(raw ? JSON.parse(raw) : []);
-    } catch {
-      processedSet = new Set();
-    }
-
-    const txs = this.getTransactions();
-    const wallets = this.getWallets();
-    const userWallet = wallets.find((w) => w.ownerUserId === userId);
-    if (!userWallet) return { newIncomingCount: 0 };
-
-    let newIncomingCount = 0;
-    let walletUpdated = false;
-
-    txs.forEach((tx) => {
-      if (
-        tx.receiverUserId === userId &&
-        tx.senderUserId !== userId &&
-        !processedSet.has(tx.transactionId)
-      ) {
-        if (tx.status === 'completed') {
-          userWallet.availableDemoBalance =
-            Math.round((userWallet.availableDemoBalance + tx.amount) * 100) / 100;
-          userWallet.totalDemoBalance =
-            Math.round((userWallet.totalDemoBalance + tx.amount) * 100) / 100;
-          walletUpdated = true;
-          newIncomingCount++;
-        } else if (tx.status === 'locked') {
-          userWallet.lockedDemoBalance =
-            Math.round((userWallet.lockedDemoBalance + tx.amount) * 100) / 100;
-          userWallet.totalDemoBalance =
-            Math.round((userWallet.totalDemoBalance + tx.amount) * 100) / 100;
-          walletUpdated = true;
-          newIncomingCount++;
-        }
-        processedSet.add(tx.transactionId);
-      }
-    });
-
-    if (walletUpdated) {
-      userWallet.assets = createDefaultAssets(userWallet.totalDemoBalance);
-      this.saveWallets(wallets);
-      localStorage.setItem(STORAGE_KEYS.PROCESSED_TXS, JSON.stringify(Array.from(processedSet)));
-    }
-
-    return { newIncomingCount };
+  /**
+   * Wallet balances are updated atomically at transfer/adjustment time in Firestore & local state.
+   * Never re-apply transaction amounts on read/subscription, as doing so causes 2x double-crediting.
+   */
+  static reconcileUserIncomingTransactions(_userId: string): { newIncomingCount: number } {
+    return { newIncomingCount: 0 };
   }
 
   static checkAndReleaseExpiredLocks(): { releasedCount: number } {
     if (typeof window === 'undefined') return { releasedCount: 0 };
     const now = Date.now();
+    const nowIso = new Date().toISOString();
     const transactions = this.getTransactions();
     const wallets = this.getWallets();
     let releasedCount = 0;
-    let walletsModified = false;
-    let txsModified = false;
+    const modifiedWallets: Wallet[] = [];
+    const modifiedTxs: Transaction[] = [];
 
     transactions.forEach((tx) => {
       if (tx.status === 'locked' && tx.lockUntil) {
@@ -1522,20 +1527,23 @@ export class WalletDatabase {
         if (now >= lockExpiryTime) {
           tx.status = 'completed';
           tx.statusTextAr = 'متاحة للتصرف (انتهى التقييد)';
-          txsModified = true;
+          modifiedTxs.push(tx);
           releasedCount++;
 
           const recipientWallet = wallets.find((w) => w.ownerUserId === tx.receiverUserId);
-          if (recipientWallet) {
+          if (recipientWallet && recipientWallet.lockedDemoBalance > 0) {
             const releaseAmount = Math.min(recipientWallet.lockedDemoBalance, tx.amount);
-            recipientWallet.lockedDemoBalance = Math.max(
-              0,
-              Math.round((recipientWallet.lockedDemoBalance - releaseAmount) * 100) / 100
-            );
-            recipientWallet.availableDemoBalance =
-              Math.round((recipientWallet.availableDemoBalance + releaseAmount) * 100) / 100;
-            recipientWallet.assets = createDefaultAssets(recipientWallet.totalDemoBalance);
-            walletsModified = true;
+            if (releaseAmount > 0) {
+              recipientWallet.lockedDemoBalance = Math.max(
+                0,
+                Math.round((recipientWallet.lockedDemoBalance - releaseAmount) * 100) / 100
+              );
+              recipientWallet.availableDemoBalance =
+                Math.round((recipientWallet.availableDemoBalance + releaseAmount) * 100) / 100;
+              recipientWallet.assets = createDefaultAssets(recipientWallet.totalDemoBalance);
+              recipientWallet.updatedAt = nowIso;
+              modifiedWallets.push(recipientWallet);
+            }
           }
 
           this.addNotification({
@@ -1551,8 +1559,18 @@ export class WalletDatabase {
       }
     });
 
-    if (txsModified) this.saveTransactions(transactions);
-    if (walletsModified) this.saveWallets(wallets);
+    if (modifiedTxs.length > 0) {
+      this.saveTransactions(transactions, false);
+      modifiedTxs.forEach((tx) => {
+        setDoc(doc(db, 'transactions', tx.transactionId), cleanForFirestore(tx), {
+          merge: true,
+        }).catch(() => {});
+      });
+    }
+    if (modifiedWallets.length > 0) {
+      this.saveWallets(wallets, false);
+      modifiedWallets.forEach((w) => this.persistWalletToFirestore(w));
+    }
     return { releasedCount };
   }
 
@@ -1569,6 +1587,72 @@ export class WalletDatabase {
     const currentAuthEmail = auth.currentUser?.email?.toLowerCase();
     if (currentAuthEmail && trustedAdmins.includes(currentAuthEmail)) return true;
     return false;
+  }
+
+  /**
+   * Async atomic owner balance adjustment (exact 1x delta, zero user Transaction record, zero admin notification).
+   */
+  static async adminAdjustBalanceAsync(params: {
+    adminUserId: string;
+    targetUserId: string;
+    amountDelta: number;
+    reason: string;
+  }): Promise<{ success: boolean; message: string }> {
+    this.initialize();
+    const { adminUserId, targetUserId, amountDelta, reason } = params;
+    const admin = this.getUserById(adminUserId);
+    if (!admin || !this.isAuthorizedOwner(admin)) {
+      return {
+        success: false,
+        message: 'غير مصرح لك بإجراء هذه العملية الإدارية.',
+      };
+    }
+    if (!reason || reason.trim().length < 4) {
+      return {
+        success: false,
+        message: 'يجب كتابة سبب واضح وموثق للتعديل الإداري.',
+      };
+    }
+    const targetUser = this.getUserById(targetUserId);
+    if (!targetUser) {
+      return {
+        success: false,
+        message: 'المستخدم المستهدف غير موجود.',
+      };
+    }
+
+    const fallbackWallet = this.getWallets().find((w) => w.ownerUserId === targetUserId) || null;
+    const cloudRes = await WalletCloudService.executeCloudAdminAdjustBalance({
+      targetUser,
+      fallbackWallet,
+      amountDelta,
+    });
+
+    if (!cloudRes.success || !cloudRes.updatedWallet) {
+      return {
+        success: false,
+        message: cloudRes.message,
+      };
+    }
+
+    this.updateLocalWallet(cloudRes.updatedWallet, false);
+
+    // Record strictly in Owner's private Audit Log (never in user's transaction history or notifications)
+    this.addAuditLog({
+      adminUserId,
+      adminUsername: admin.username,
+      actionType: amountDelta >= 0 ? 'balance_add' : 'balance_deduct',
+      targetUserId,
+      targetUsername: targetUser.username,
+      reason: reason.trim(),
+      previousValue: `$${(cloudRes.prevBalance ?? 0).toFixed(2)}`,
+      newValue: `$${(cloudRes.newBalance ?? 0).toFixed(2)}`,
+    });
+
+    return {
+      success: true,
+      message: cloudRes.message,
+    };
   }
 
   static adminAdjustBalance(params: {
@@ -1609,7 +1693,6 @@ export class WalletDatabase {
     }
 
     const prevBalance = targetWallet.totalDemoBalance;
-    const newBalance = Math.max(0, Math.round((prevBalance + amountDelta) * 100) / 100);
     if (amountDelta < 0 && targetWallet.availableDemoBalance < Math.abs(amountDelta)) {
       return {
         success: false,
@@ -1617,19 +1700,25 @@ export class WalletDatabase {
       };
     }
 
-    targetWallet.totalDemoBalance = newBalance;
-    if (amountDelta >= 0) {
-      targetWallet.availableDemoBalance =
-        Math.round((targetWallet.availableDemoBalance + amountDelta) * 100) / 100;
-    } else {
-      targetWallet.availableDemoBalance = Math.max(
-        0,
-        Math.round((targetWallet.availableDemoBalance + amountDelta) * 100) / 100
-      );
-    }
-    targetWallet.assets = createDefaultAssets(newBalance);
-    this.saveWallets(wallets);
+    const nextAvailable = Math.max(
+      0,
+      Math.round((targetWallet.availableDemoBalance + amountDelta) * 100) / 100
+    );
+    const newBalance = Math.max(
+      0,
+      Math.round((nextAvailable + targetWallet.lockedDemoBalance) * 100) / 100
+    );
 
+    const updatedWallet: Wallet = {
+      ...targetWallet,
+      availableDemoBalance: nextAvailable,
+      totalDemoBalance: newBalance,
+      assets: createDefaultAssets(newBalance),
+      updatedAt: new Date().toISOString(),
+    };
+    this.updateLocalWallet(updatedWallet, true);
+
+    // Record strictly in Owner's private Audit Log (never in user's transaction history or notifications)
     this.addAuditLog({
       adminUserId,
       adminUsername: admin.username,
@@ -1641,42 +1730,9 @@ export class WalletDatabase {
       newValue: `$${newBalance.toFixed(2)}`,
     });
 
-    const tx: Transaction = {
-      transactionId: 'TX_ADMIN_' + Date.now().toString(36).toUpperCase(),
-      senderUserId: adminUserId,
-      senderUsername: `Admin (${admin.username})`,
-      senderAddress: admin.demoAddress,
-      receiverUserId: targetUserId,
-      receiverUsername: targetUser.username,
-      receiverAddress: targetUser.demoAddress,
-      amount: Math.abs(amountDelta),
-      currency: 'USD',
-      network: 'BEP20',
-      transactionType: 'admin_adjustment',
-      status: 'completed',
-      statusTextAr: amountDelta >= 0 ? 'إضافة إدارية موثقة' : 'خصم إداري موثق',
-      createdAt: new Date().toISOString(),
-      isSimulated: true,
-      notes: `تعديل إداري: ${reason}`,
-    };
-
-    const txs = this.getTransactions();
-    txs.unshift(tx);
-    this.saveTransactions(txs);
-
-    this.addNotification({
-      recipientUserId: targetUserId,
-      transactionId: tx.transactionId,
-      title: 'تعديل رصيد من الإدارة',
-      titleAr: 'تعديل رصيد من الإدارة',
-      body: `تم ${amountDelta >= 0 ? 'إضافة' : 'خصم'} ${Math.abs(amountDelta)}$ في رصيدك. السبب: ${reason}`,
-      bodyAr: `تم ${amountDelta >= 0 ? 'إضافة' : 'خصم'} ${Math.abs(amountDelta)}$ في رصيدك. السبب: ${reason}`,
-      type: 'admin',
-    });
-
     return {
       success: true,
-      message: `تم تحديث رصيد ${targetUser.username} بنجاح من $${prevBalance} إلى $${newBalance}.`,
+      message: `تم تحديث رصيد ${targetUser.username} بنجاح من $${prevBalance.toFixed(2)} إلى $${newBalance.toFixed(2)}.`,
     };
   }
 

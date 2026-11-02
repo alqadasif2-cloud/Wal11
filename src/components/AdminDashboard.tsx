@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { User, Transaction, Wallet } from '../types/wallet';
+import { isWalletTransferTransaction, User, Transaction, Wallet } from '../types/wallet';
 import { WalletDatabase } from '../services/walletDb';
 import { formatCurrency, shortenAddress, formatDateTime } from '../utils/formatters';
 import { 
@@ -44,10 +44,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [adjustmentReason, setAdjustmentReason] = useState<string>('');
   const [actionError, setActionError] = useState<string>('');
   const [actionSuccess, setActionSuccess] = useState<string>('');
+  const [isAdjusting, setIsAdjusting] = useState<boolean>(false);
 
   const users = WalletDatabase.getUsers();
   const wallets = WalletDatabase.getWallets();
-  const allTxs = WalletDatabase.getTransactions();
+  const allTxs = WalletDatabase.getTransactions().filter(isWalletTransferTransaction);
   const auditLogs = WalletDatabase.getAuditLogs();
 
   const totalSystemBalance = wallets.reduce((sum: number, w: Wallet) => sum + (w.totalDemoBalance || 0), 0);
@@ -60,8 +61,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     u.demoAddress.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const handleAdjustBalance = (e: React.FormEvent) => {
+  const handleAdjustBalance = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isAdjusting) return;
     setActionError('');
     setActionSuccess('');
 
@@ -79,27 +81,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
 
     const delta = adjustmentType === 'add' ? amt : -amt;
+    setIsAdjusting(true);
 
-    const res = WalletDatabase.adminAdjustBalance({
-      adminUserId: currentUser.userId,
-      targetUserId: targetUserForAdjustment.userId,
-      amountDelta: delta,
-      reason: adjustmentReason.trim()
-    });
+    try {
+      const res = await WalletDatabase.adminAdjustBalanceAsync({
+        adminUserId: currentUser.userId,
+        targetUserId: targetUserForAdjustment.userId,
+        amountDelta: delta,
+        reason: adjustmentReason.trim()
+      });
 
-    if (!res.success) {
-      setActionError(res.message);
-      return;
+      if (!res.success) {
+        setActionError(res.message);
+        return;
+      }
+
+      setActionSuccess(res.message);
+      setAdjustmentAmount('');
+      setAdjustmentReason('');
+      onRefresh();
+      setTimeout(() => {
+        setTargetUserForAdjustment(null);
+        setActionSuccess('');
+      }, 900);
+    } finally {
+      setIsAdjusting(false);
     }
-
-    setActionSuccess(res.message);
-    setAdjustmentAmount('');
-    setAdjustmentReason('');
-    onRefresh();
-    setTimeout(() => {
-      setTargetUserForAdjustment(null);
-      setActionSuccess('');
-    }, 1500);
   };
 
   const handleToggleUserStatus = (target: User) => {
@@ -585,14 +592,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <div className="pt-2 flex items-center gap-2">
                   <button
                     type="submit"
-                    className="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg shadow-blue-600/30 transition-colors"
+                    disabled={isAdjusting}
+                    className="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg shadow-blue-600/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {isArabic ? 'تنفيذ التعديل وتوثيقه' : 'Confirm & Log'}
+                    {isAdjusting
+                      ? (isArabic ? 'جاري التحديث...' : 'Updating...')
+                      : (isArabic ? 'تنفيذ التعديل وتوثيقه' : 'Confirm & Log')}
                   </button>
                   <button
                     type="button"
+                    disabled={isAdjusting}
                     onClick={() => setTargetUserForAdjustment(null)}
-                    className="py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold"
+                    className="py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold disabled:opacity-50"
                   >
                     {isArabic ? 'إلغاء' : 'Cancel'}
                   </button>

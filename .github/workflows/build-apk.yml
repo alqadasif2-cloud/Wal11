@@ -100,7 +100,10 @@ jobs:
             cp /tmp/android_preserved/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
           fi
           if [ -d "/tmp/android_preserved/res" ]; then
-            cp -r /tmp/android_preserved/res/* android/app/src/main/res/
+            rm -rf android/app/src/main/res
+            cp -r /tmp/android_preserved/res android/app/src/main/res
+            rm -f android/app/src/main/res/drawable-v24/ic_launcher_foreground.xml
+            rm -f android/app/src/main/res/drawable/ic_launcher_background.xml
           fi
           for kf in signing.keystore debug.keystore google-services.json; do
             if [ -f "/tmp/android_preserved/$kf" ]; then
@@ -112,7 +115,8 @@ jobs:
           node scripts/sync-firebase-config.mjs
           npx -y @capacitor/cli sync android
 
-          # Enforce exact applicationId, versionCode 2, versionName 1.0.1, and zero applicationIdSuffix
+          # Enforce exact app name TRUST WALLET, applicationId, versionCode 2, versionName 1.0.1, and zero applicationIdSuffix
+          grep -q '<string name="app_name">TRUST WALLET</string>' android/app/src/main/res/values/strings.xml
           grep -q 'applicationId "com.trustwallet.pro"' android/app/build.gradle
           grep -q 'versionCode 2' android/app/build.gradle
           grep -q 'versionName "1.0.1"' android/app/build.gradle
@@ -176,12 +180,13 @@ jobs:
           # Verify internal binary AndroidManifest metadata using Android SDK aapt2
           AAPT2_BIN=$(find "$ANDROID_HOME/build-tools" -name "aapt2" | sort -V | tail -n 1)
           if [ -n "$AAPT2_BIN" ]; then
-            BADGING=$("$AAPT2_BIN" dump badging "output-apk/${APK_FILE_NAME}" | head -n 5)
-            echo "$BADGING"
+            BADGING=$("$AAPT2_BIN" dump badging "output-apk/${APK_FILE_NAME}")
+            echo "$BADGING" | grep -E "^(package:|application-label:|application:)"
             echo "$BADGING" | grep -q "name='com.trustwallet.pro'"
             echo "$BADGING" | grep -q "versionCode='2'"
             echo "$BADGING" | grep -q "versionName='1.0.1'"
-            echo "✅ Verified internal APK binary metadata: com.trustwallet.pro | versionCode=2 | versionName=1.0.1"
+            echo "$BADGING" | grep -q "application-label:'TRUST WALLET'"
+            echo "✅ Verified internal APK binary metadata: TRUST WALLET | com.trustwallet.pro | versionCode=2 | versionName=1.0.1"
           fi
 
       - name: Upload TRUST-WALLET-1.0.1.apk Artifact
@@ -194,6 +199,7 @@ jobs:
       - name: Build Summary
         run: |
           echo "### 📦 TRUST-WALLET-1.0.1.apk" >> $GITHUB_STEP_SUMMARY
+          echo "- **App Name:** \`TRUST WALLET\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Application ID:** \`com.trustwallet.pro\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Version Name:** \`1.0.1\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Version Code:** \`2\`" >> $GITHUB_STEP_SUMMARY

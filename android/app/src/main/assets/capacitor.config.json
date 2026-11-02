@@ -1,5 +1,5 @@
 {
-	"appId": "com.trustwallet.pro",
-	"appName": "TRUST WALLET PRO",
-	"webDir": "dist"
+  "appId": "com.trustwallet.pro",
+  "appName": "TRUST WALLET",
+  "webDir": "dist"
 }

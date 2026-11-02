@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Transaction } from '../types/wallet';
+import { isWalletTransferTransaction, Transaction } from '../types/wallet';
 import { formatCurrency, formatDateTime, shortenAddress } from '../utils/formatters';
 import { 
   ArrowUpRight, 
@@ -36,8 +36,9 @@ export const TransactionHistory: React.FC<TransactionHistoryProps> = ({
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [copiedHash, setCopiedHash] = useState(false);
 
-  // Filter transactions
+  // Filter transactions strictly to wallet-to-wallet transfers
   const filteredTxs = transactions.filter(tx => {
+    if (!isWalletTransferTransaction(tx)) return false;
     const isSender = tx.senderUserId === currentUserId;
     const isReceiver = tx.receiverUserId === currentUserId;
 

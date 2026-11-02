@@ -1,23 +1,29 @@
 {
-  "short_name": "TrustWallet",
-  "name": "TRUST WALLET PRO",
+  "short_name": "TRUST WALLET",
+  "name": "TRUST WALLET",
   "version": "1.0.1",
   "icons": [
     {
-      "src": "/assets/aistudio/Screenshot_20261021140623_7cfed00d.jpg",
+      "src": "./icon-192.png",
       "sizes": "192x192",
-      "type": "image/jpeg",
+      "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "/assets/aistudio/Screenshot_20261021140623_7cfed00d.jpg",
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./assets/aistudio/Screenshot_20261014212008_a818ec9f.jpg",
       "sizes": "512x512",
       "type": "image/jpeg",
-      "purpose": "any maskable"
+      "purpose": "any"
     }
   ],
   "start_url": "./",
-  "background_color": "#070b13",
+  "background_color": "#ffffff",
   "theme_color": "#0b111e",
   "display": "standalone",
   "orientation": "portrait"
